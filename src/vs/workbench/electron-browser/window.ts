@@ -25,11 +25,10 @@ import { IEditorGroupService } from 'vs/workbench/services/group/common/groupSer
 import { IMessageService } from 'vs/platform/message/common/message';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { IWorkspaceConfigurationService } from 'vs/workbench/services/configuration/common/configuration';
-import { IWindowsService, IWindowService, IWindowSettings, IPath, IOpenFileRequest, IWindowsConfiguration, IAddFoldersRequest } from 'vs/platform/windows/common/windows';
+import { IWindowsService, IWindowService, IWindowSettings, IPath, IOpenFileRequest, IWindowsConfiguration, IAddFoldersRequest, IRunActionInWindowRequest } from 'vs/platform/windows/common/windows';
 import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { IKeybindingService } from 'vs/platform/keybinding/common/keybinding';
-import { IConfigurationEditingService, ConfigurationTarget } from 'vs/workbench/services/configuration/common/configurationEditing';
 import { ITitleService } from 'vs/workbench/services/title/common/titleService';
 import { IWorkbenchThemeService, VS_HC_THEME, VS_DARK_THEME } from 'vs/workbench/services/themes/common/workbenchThemeService';
 import * as browser from 'vs/base/browser/browser';
@@ -40,13 +39,14 @@ import { IExtensionService } from 'vs/platform/extensions/common/extensions';
 import { KeyboardMapperFactory } from 'vs/workbench/services/keybinding/electron-browser/keybindingService';
 import { Themable } from 'vs/workbench/common/theme';
 import { ipcRenderer as ipc, webFrame } from 'electron';
-import { IWorkspaceContextService, WorkbenchState } from 'vs/platform/workspace/common/workspace';
+import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
 import { IWorkspaceEditingService } from 'vs/workbench/services/workspace/common/workspaceEditing';
 import { IMenuService, MenuId, IMenu, MenuItemAction, ICommandAction } from 'vs/platform/actions/common/actions';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { fillInActions } from 'vs/platform/actions/browser/menuItemActionItem';
 import { RunOnceScheduler } from 'vs/base/common/async';
 import { IDisposable, dispose } from 'vs/base/common/lifecycle';
+import { ConfigurationTarget, IConfigurationChangeEvent } from 'vs/platform/configuration/common/configuration';
 
 const TextInputActions: IAction[] = [
 	new Action('undo', nls.localize('undo', "Undo"), null, true, () => document.execCommand('undo') && TPromise.as(true)),
@@ -81,7 +81,6 @@ export class ElectronWindow extends Themable {
 		@ITitleService private titleService: ITitleService,
 		@IWorkbenchThemeService protected themeService: IWorkbenchThemeService,
 		@IMessageService private messageService: IMessageService,
-		@IConfigurationEditingService private configurationEditingService: IConfigurationEditingService,
 		@ICommandService private commandService: ICommandService,
 		@IExtensionService private extensionService: IExtensionService,
 		@IViewletService private viewletService: IViewletService,
@@ -127,9 +126,31 @@ export class ElectronWindow extends Themable {
 		});
 
 		// Support runAction event
-		ipc.on('vscode:runAction', (event, actionId: string) => {
-			this.commandService.executeCommand(actionId, { from: 'menu' }).done(_ => {
-				this.telemetryService.publicLog('commandExecuted', { id: actionId, from: 'menu' });
+		ipc.on('vscode:runAction', (event, request: IRunActionInWindowRequest) => {
+			const args: any[] = [];
+
+			// If we run an action from the touchbar, we fill in the currently active resource
+			// as payload because the touch bar items are context aware depending on the editor
+			if (request.from === 'touchbar') {
+				const activeEditor = this.editorService.getActiveEditor();
+				if (activeEditor) {
+					const resource = toResource(activeEditor.input, { supportSideBySide: true });
+					if (resource) {
+						args.push(resource);
+					}
+				}
+			} else {
+				args.push({ from: request.from }); // TODO@telemetry this is a bit weird to send this to every action?
+			}
+
+			this.commandService.executeCommand(request.id, ...args).done(_ => {
+				/* __GDPR__
+					"commandExecuted" : {
+						"id" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+						"from": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+					}
+				*/
+				this.telemetryService.publicLog('commandExecuted', { id: request.id, from: request.from });
 			}, err => {
 				this.messageService.show(Severity.Error, err);
 			});
@@ -209,8 +230,8 @@ export class ElectronWindow extends Themable {
 		});
 
 		// keyboard layout changed event
-		ipc.on('vscode:keyboardLayoutChanged', (event, isISOKeyboard: boolean) => {
-			KeyboardMapperFactory.INSTANCE._onKeyboardLayoutChanged(isISOKeyboard);
+		ipc.on('vscode:keyboardLayoutChanged', event => {
+			KeyboardMapperFactory.INSTANCE._onKeyboardLayoutChanged();
 		});
 
 		// keyboard layout changed event
@@ -219,7 +240,7 @@ export class ElectronWindow extends Themable {
 		});
 
 		// Configuration changes
-		this.toUnbind.push(this.configurationService.onDidUpdateConfiguration(e => this.onDidUpdateConfiguration(e)));
+		this.toUnbind.push(this.configurationService.onDidChangeConfiguration(e => this.onDidUpdateConfiguration(e)));
 
 		// Context menu support in input/textarea
 		window.document.addEventListener('contextmenu', e => this.onContextMenu(e));
@@ -240,7 +261,11 @@ export class ElectronWindow extends Themable {
 		}
 	}
 
-	private onDidUpdateConfiguration(e): void {
+	private onDidUpdateConfiguration(event: IConfigurationChangeEvent): void {
+		if (!event.affectsConfiguration('window.zoomLevel')) {
+			return;
+		}
+
 		const windowConfig: IWindowsConfiguration = this.configurationService.getConfiguration<IWindowsConfiguration>();
 
 		let newZoomLevel = 0;
@@ -375,23 +400,9 @@ export class ElectronWindow extends Themable {
 	}
 
 	private onAddFolders(request: IAddFoldersRequest): void {
-		const foldersToAdd = request.foldersToAdd.map(folderToAdd => URI.file(folderToAdd.filePath));
+		const foldersToAdd = request.foldersToAdd.map(folderToAdd => ({ uri: URI.file(folderToAdd.filePath) }));
 
-		// Workspace: just add to workspace config
-		if (this.contextService.getWorkbenchState() === WorkbenchState.WORKSPACE) {
-			this.workspaceEditingService.addFolders(foldersToAdd).done(null, errors.onUnexpectedError);
-		}
-
-		// Single folder or no workspace: create workspace and open
-		else {
-			const workspaceFolders: URI[] = [...this.contextService.getWorkspace().folders.map(folder => folder.uri)];
-
-			// Fill in remaining ones from request
-			workspaceFolders.push(...request.foldersToAdd.map(folderToAdd => URI.file(folderToAdd.filePath)));
-
-			// Create workspace and open (ensure no duplicates)
-			this.workspaceEditingService.createAndEnterWorkspace(arrays.distinct(workspaceFolders.map(folder => folder.fsPath), folder => platform.isLinux ? folder : folder.toLowerCase()));
-		}
+		this.workspaceEditingService.addFolders(foldersToAdd).done(null, errors.onUnexpectedError);
 	}
 
 	private onOpenFiles(request: IOpenFileRequest): void {
@@ -476,7 +487,7 @@ export class ElectronWindow extends Themable {
 	}
 
 	private toggleAutoSave(): void {
-		const setting = this.configurationService.lookup(ElectronWindow.AUTO_SAVE_SETTING);
+		const setting = this.configurationService.inspect(ElectronWindow.AUTO_SAVE_SETTING);
 		let userAutoSaveConfig = setting.user;
 		if (types.isUndefinedOrNull(userAutoSaveConfig)) {
 			userAutoSaveConfig = setting.default; // use default if setting not defined
@@ -489,7 +500,7 @@ export class ElectronWindow extends Themable {
 			newAutoSaveValue = AutoSaveConfiguration.AFTER_DELAY;
 		}
 
-		this.configurationEditingService.writeConfiguration(ConfigurationTarget.USER, { key: ElectronWindow.AUTO_SAVE_SETTING, value: newAutoSaveValue });
+		this.configurationService.updateValue(ElectronWindow.AUTO_SAVE_SETTING, newAutoSaveValue, ConfigurationTarget.USER);
 	}
 
 	public dispose(): void {

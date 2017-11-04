@@ -15,16 +15,19 @@ export interface IFolderSearch {
 	excludePattern?: IExpression;
 	includePattern?: IExpression;
 	fileEncoding?: string;
+	disregardIgnoreFiles?: boolean;
 }
 
 export interface IRawSearch {
 	folderQueries: IFolderSearch[];
+	ignoreSymlinks?: boolean;
 	extraFiles?: string[];
 	filePattern?: string;
 	excludePattern?: IExpression;
 	includePattern?: IExpression;
 	contentPattern?: IPatternInfo;
 	maxResults?: number;
+	exists?: boolean;
 	sortByScore?: boolean;
 	cacheKey?: string;
 	maxFilesize?: number;

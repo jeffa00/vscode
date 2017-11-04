@@ -5,7 +5,7 @@
 
 'use strict';
 
-import { IWorkspacesMainService, IWorkspaceIdentifier, IStoredWorkspace, WORKSPACE_EXTENSION, IWorkspaceSavedEvent, UNTITLED_WORKSPACE_NAME, IResolvedWorkspace } from 'vs/platform/workspaces/common/workspaces';
+import { IWorkspacesMainService, IWorkspaceIdentifier, WORKSPACE_EXTENSION, IWorkspaceSavedEvent, UNTITLED_WORKSPACE_NAME, IResolvedWorkspace, IStoredWorkspaceFolder, isRawFileWorkspaceFolder, isStoredWorkspaceFolder, IWorkspaceFolderCreationData } from 'vs/platform/workspaces/common/workspaces';
 import { TPromise } from 'vs/base/common/winjs.base';
 import { isParent } from 'vs/platform/files/common/files';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
@@ -23,6 +23,12 @@ import * as json from 'vs/base/common/json';
 import * as jsonEdit from 'vs/base/common/jsonEdit';
 import { applyEdit } from 'vs/base/common/jsonFormatter';
 import { massageFolderPathForWorkspace } from 'vs/platform/workspaces/node/workspaces';
+import { toWorkspaceFolders } from 'vs/platform/workspace/common/workspace';
+import URI from 'vs/base/common/uri';
+
+export interface IStoredWorkspace {
+	folders: IStoredWorkspaceFolder[];
+}
 
 export class WorkspacesMainService implements IWorkspacesMainService {
 
@@ -64,7 +70,14 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 			return null; // does not look like a valid workspace config file
 		}
 
-		return this.doResolveWorkspace(path, readFileSync(path, 'utf8'));
+		let contents: string;
+		try {
+			contents = readFileSync(path, 'utf8');
+		} catch (error) {
+			return null; // invalid workspace
+		}
+
+		return this.doResolveWorkspace(path, contents);
 	}
 
 	private isWorkspacePath(path: string): boolean {
@@ -75,17 +88,10 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 		try {
 			const workspace = this.doParseStoredWorkspace(path, contents);
 
-			// relative paths get resolved against the workspace location
-			workspace.folders.forEach(folder => {
-				if (!isAbsolute(folder.path)) {
-					folder.path = resolve(dirname(path), folder.path);
-				}
-			});
-
 			return {
 				id: this.getWorkspaceId(path),
 				configPath: path,
-				folders: workspace.folders
+				folders: toWorkspaceFolders(workspace.folders, URI.file(dirname(path)))
 			};
 		} catch (error) {
 			this.logService.log(error.toString());
@@ -104,13 +110,13 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 			throw new Error(`${path} cannot be parsed as JSON file (${error}).`);
 		}
 
-		// Filter out folders which do not have a path set
+		// Filter out folders which do not have a path or uri set
 		if (Array.isArray(storedWorkspace.folders)) {
-			storedWorkspace.folders = storedWorkspace.folders.filter(folder => !!folder.path);
+			storedWorkspace.folders = storedWorkspace.folders.filter(folder => isStoredWorkspaceFolder(folder));
 		}
 
 		// Validate
-		if (!Array.isArray(storedWorkspace.folders) || storedWorkspace.folders.length === 0) {
+		if (!Array.isArray(storedWorkspace.folders)) {
 			throw new Error(`${path} looks like an invalid workspace file.`);
 		}
 
@@ -121,7 +127,7 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 		return isParent(path, this.environmentService.workspacesHome, !isLinux /* ignore case */);
 	}
 
-	public createWorkspace(folders: string[]): TPromise<IWorkspaceIdentifier> {
+	public createWorkspace(folders?: IWorkspaceFolderCreationData[]): TPromise<IWorkspaceIdentifier> {
 		const { workspace, configParent, storedWorkspace } = this.createUntitledWorkspace(folders);
 
 		return mkdirp(configParent).then(() => {
@@ -129,7 +135,7 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 		});
 	}
 
-	public createWorkspaceSync(folders: string[]): IWorkspaceIdentifier {
+	public createWorkspaceSync(folders?: IWorkspaceFolderCreationData[]): IWorkspaceIdentifier {
 		const { workspace, configParent, storedWorkspace } = this.createUntitledWorkspace(folders);
 
 		if (!existsSync(this.workspacesHome)) {
@@ -143,15 +149,32 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 		return workspace;
 	}
 
-	private createUntitledWorkspace(folders: string[]): { workspace: IWorkspaceIdentifier, configParent: string, storedWorkspace: IStoredWorkspace } {
+	private createUntitledWorkspace(folders: IWorkspaceFolderCreationData[] = []): { workspace: IWorkspaceIdentifier, configParent: string, storedWorkspace: IStoredWorkspace } {
 		const randomId = (Date.now() + Math.round(Math.random() * 1000)).toString();
 		const untitledWorkspaceConfigFolder = join(this.workspacesHome, randomId);
 		const untitledWorkspaceConfigPath = join(untitledWorkspaceConfigFolder, UNTITLED_WORKSPACE_NAME);
 
 		const storedWorkspace: IStoredWorkspace = {
-			folders: folders.map(folder => ({
-				path: folder
-			}))
+			folders: folders.map(folder => {
+				const folderResource = folder.uri;
+				let storedWorkspace: IStoredWorkspaceFolder;
+
+				// File URI
+				if (folderResource.scheme === 'file') {
+					storedWorkspace = { path: massageFolderPathForWorkspace(folderResource.fsPath, untitledWorkspaceConfigFolder, []) };
+				}
+
+				// Any URI
+				else {
+					storedWorkspace = { uri: folderResource.toString(true) };
+				}
+
+				if (folder.name) {
+					storedWorkspace.name = folder.name;
+				}
+
+				return storedWorkspace;
+			})
 		};
 
 		return {
@@ -200,11 +223,13 @@ export class WorkspacesMainService implements IWorkspacesMainService {
 			// is a parent of the location of the workspace file itself. Otherwise keep
 			// using absolute paths.
 			storedWorkspace.folders.forEach(folder => {
-				if (!isAbsolute(folder.path)) {
-					folder.path = resolve(sourceConfigFolder, folder.path); // relative paths get resolved against the workspace location
+				if (isRawFileWorkspaceFolder(folder)) {
+					if (!isAbsolute(folder.path)) {
+						folder.path = resolve(sourceConfigFolder, folder.path); // relative paths get resolved against the workspace location
+					}
+					folder.path = massageFolderPathForWorkspace(folder.path, targetConfigFolder, storedWorkspace.folders);
 				}
 
-				folder.path = massageFolderPathForWorkspace(folder.path, targetConfigFolder, storedWorkspace.folders);
 			});
 
 			// Preserve as much of the existing workspace as possible by using jsonEdit

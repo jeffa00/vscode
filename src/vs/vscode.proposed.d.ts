@@ -7,35 +7,128 @@
 
 declare module 'vscode' {
 
-	export interface OpenDialogOptions {
-		defaultResource?: Uri;
-		openLabel?: string;
-		openFiles?: boolean;
-		openFolders?: boolean;
-		openMany?: boolean;
+	// export enum FileErrorCodes {
+	// 	/**
+	// 	 * Not owner.
+	// 	 */
+	// 	EPERM = 1,
+	// 	/**
+	// 	 * No such file or directory.
+	// 	 */
+	// 	ENOENT = 2,
+	// 	/**
+	// 	 * I/O error.
+	// 	 */
+	// 	EIO = 5,
+	// 	/**
+	// 	 * Permission denied.
+	// 	 */
+	// 	EACCES = 13,
+	// 	/**
+	// 	 * File exists.
+	// 	 */
+	// 	EEXIST = 17,
+	// 	/**
+	// 	 * Not a directory.
+	// 	 */
+	// 	ENOTDIR = 20,
+	// 	/**
+	// 	 * Is a directory.
+	// 	 */
+	// 	EISDIR = 21,
+	// 	/**
+	// 	 *  File too large.
+	// 	 */
+	// 	EFBIG = 27,
+	// 	/**
+	// 	 * No space left on device.
+	// 	 */
+	// 	ENOSPC = 28,
+	// 	/**
+	// 	 * Directory is not empty.
+	// 	 */
+	// 	ENOTEMPTY = 66,
+	// 	/**
+	// 	 * Invalid file handle.
+	// 	 */
+	// 	ESTALE = 70,
+	// 	/**
+	// 	 * Illegal NFS file handle.
+	// 	 */
+	// 	EBADHANDLE = 10001,
+	// }
+
+	export enum FileChangeType {
+		Updated = 0,
+		Added = 1,
+		Deleted = 2
 	}
 
-	export interface SaveDialogOptions {
-		defaultResource?: Uri;
-		saveLabel?: string;
+	export interface FileChange {
+		type: FileChangeType;
+		resource: Uri;
 	}
 
-	export namespace window {
-		export function showOpenDialog(options: OpenDialogOptions): Thenable<Uri[]>;
-		export function showSaveDialog(options: SaveDialogOptions): Thenable<Uri>;
+	export enum FileType {
+		File = 0,
+		Dir = 1,
+		Symlink = 2
+	}
+
+	export interface FileStat {
+		id: number | string;
+		mtime: number;
+		// atime: number;
+		size: number;
+		type: FileType;
 	}
 
 	// todo@joh discover files etc
 	export interface FileSystemProvider {
-		// todo@joh -> added, deleted, renamed, changed
-		onDidChange: Event<Uri>;
 
-		resolveContents(resource: Uri): string | Thenable<string>;
-		writeContents(resource: Uri, contents: string): void | Thenable<void>;
+		onDidChange?: Event<FileChange[]>;
 
-		// -- search
-		// todo@joh - extract into its own provider?
-		findFiles(query: string, progress: Progress<Uri>, token?: CancellationToken): Thenable<void>;
+		root: Uri;
+
+		// more...
+		//
+		utimes(resource: Uri, mtime: number, atime: number): Thenable<FileStat>;
+
+		stat(resource: Uri): Thenable<FileStat>;
+
+		read(resource: Uri, offset: number, length: number, progress: Progress<Uint8Array>): Thenable<number>;
+
+		// todo@remote
+		// offset - byte offset to start
+		// count - number of bytes to write
+		// Thenable<number> - number of bytes actually written
+		write(resource: Uri, content: Uint8Array): Thenable<void>;
+
+		// todo@remote
+		// Thenable<FileStat>
+		move(resource: Uri, target: Uri): Thenable<FileStat>;
+
+		// todo@remote
+		// helps with performance bigly
+		// copy?(from: Uri, to: Uri): Thenable<void>;
+
+		// todo@remote
+		// Thenable<FileStat>
+		mkdir(resource: Uri): Thenable<FileStat>;
+
+		readdir(resource: Uri): Thenable<[Uri, FileStat][]>;
+
+		// todo@remote
+		// ? merge both
+		// ? recursive del
+		rmdir(resource: Uri): Thenable<void>;
+		unlink(resource: Uri): Thenable<void>;
+
+		// todo@remote
+		// create(resource: Uri): Thenable<FileStat>;
+
+		// find files by names
+		findFiles?(query: string, progress: Progress<Uri>, token: CancellationToken): Thenable<void>;
 	}
 
 	export namespace workspace {
@@ -76,100 +169,59 @@ declare module 'vscode' {
 		export function registerDiffInformationCommand(command: string, callback: (diff: LineChange[], ...args: any[]) => any, thisArg?: any): Disposable;
 	}
 
-	/**
-	 * Represents a color in RGBA space.
-	 */
-	export class Color {
+	//#region decorations
 
-		/**
-		 * The red component of this color in the range [0-1].
-		 */
-		readonly red: number;
-
-		/**
-		 * The green component of this color in the range [0-1].
-		 */
-		readonly green: number;
-
-		/**
-		 * The blue component of this color in the range [0-1].
-		 */
-		readonly blue: number;
-
-		/**
-		 * The alpha component of this color in the range [0-1].
-		 */
-		readonly alpha: number;
-
-		constructor(red: number, green: number, blue: number, alpha: number);
+	//todo@joh -> make class
+	export interface DecorationData {
+		priority?: number;
+		title?: string;
+		bubble?: boolean;
+		abbreviation?: string;
+		color?: ThemeColor;
+		source?: string;
 	}
 
+	export interface SourceControlResourceDecorations {
+		source?: string;
+		letter?: string;
+		color?: ThemeColor;
+	}
+
+	export interface DecorationProvider {
+		onDidChangeDecorations: Event<undefined | Uri | Uri[]>;
+		provideDecoration(uri: Uri, token: CancellationToken): ProviderResult<DecorationData>;
+	}
+
+	export namespace window {
+		export function registerDecorationProvider(provider: DecorationProvider): Disposable;
+	}
+
+	//#endregion
+
 	/**
-	 * Represents a color range from a document.
+	 * Represents the debug console.
 	 */
-	export class ColorInformation {
-
+	export interface DebugConsole {
 		/**
-		 * The range in the document where this color appers.
-		 */
-		range: Range;
-
-		/**
-		 * The actual color value for this color range.
-		 */
-		color: Color;
-
-		/**
-		 * Creates a new color range.
+		 * Append the given value to the debug console.
 		 *
-		 * @param range The range the color appears in. Must not be empty.
-		 * @param color The value of the color.
-		 * @param format The format in which this color is currently formatted.
+		 * @param value A string, falsy values will not be printed.
 		 */
-		constructor(range: Range, color: Color);
-	}
+		append(value: string): void;
 
-	export class ColorPresentation {
 		/**
-		 * The label of this color presentation. It will be shown on the color
-		 * picker header. By default this is also the text that is inserted when selecting
-		 * this color presentation.
-		 */
-		label: string;
-		/**
-		 * An [edit](#TextEdit) which is applied to a document when selecting
-		 * this presentation for the color.  When `falsy` the [label](#ColorPresentation.label)
-		 * is used.
-		 */
-		textEdit?: TextEdit;
-		/**
-		 * An optional array of additional [text edits](#TextEdit) that are applied when
-		 * selecting this color presentation. Edits must not overlap with the main [edit](#ColorPresentation.textEdit) nor with themselves.
-		 */
-		additionalTextEdits?: TextEdit[];
-	}
-
-	/**
-	 * The document color provider defines the contract between extensions and feature of
-	 * picking and modifying colors in the editor.
-	 */
-	export interface DocumentColorProvider {
-		/**
-		 * Provide colors for the given document.
+		 * Append the given value and a line feed character
+		 * to the debug console.
 		 *
-		 * @param document The document in which the command was invoked.
-		 * @param token A cancellation token.
-		 * @return An array of [color informations](#ColorInformation) or a thenable that resolves to such. The lack of a result
-		 * can be signaled by returning `undefined`, `null`, or an empty array.
+		 * @param value A string, falsy values will be printed.
 		 */
-		provideDocumentColors(document: TextDocument, token: CancellationToken): ProviderResult<ColorInformation[]>;
-		/**
-		 * Provide representations for a color.
-		 */
-		provideColorPresentations(colorInfo: ColorInformation, token: CancellationToken): ProviderResult<ColorPresentation[]>;
+		appendLine(value: string): void;
 	}
 
-	export namespace languages {
-		export function registerColorProvider(selector: DocumentSelector, provider: DocumentColorProvider): Disposable;
+	export namespace debug {
+		/**
+		 * The [debug console](#DebugConsole) singleton.
+		 */
+		export let console: DebugConsole;
 	}
 }

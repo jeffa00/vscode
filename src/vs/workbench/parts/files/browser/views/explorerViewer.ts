@@ -13,6 +13,7 @@ import URI from 'vs/base/common/uri';
 import { MIME_BINARY } from 'vs/base/common/mime';
 import { once } from 'vs/base/common/functional';
 import paths = require('vs/base/common/paths');
+import resources = require('vs/base/common/resources');
 import errors = require('vs/base/common/errors');
 import { isString } from 'vs/base/common/types';
 import { IAction, ActionRunner as BaseActionRunner, IActionRunner } from 'vs/base/common/actions';
@@ -36,11 +37,11 @@ import { DragMouseEvent, IMouseEvent } from 'vs/base/browser/mouseEvent';
 import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { IPartService } from 'vs/workbench/services/part/common/partService';
 import { IWorkspaceContextService, WorkbenchState } from 'vs/platform/workspace/common/workspace';
-import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { IConfigurationService, ConfigurationTarget } from 'vs/platform/configuration/common/configuration';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { IContextViewService, IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import { IMessageService, IConfirmation, Severity } from 'vs/platform/message/common/message';
+import { IMessageService, IConfirmation, Severity, IConfirmationResult } from 'vs/platform/message/common/message';
 import { IProgressService } from 'vs/platform/progress/common/progress';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
 import { KeyCode } from 'vs/base/common/keyCodes';
@@ -52,7 +53,6 @@ import { attachInputBoxStyler } from 'vs/platform/theme/common/styler';
 import { IThemeService } from 'vs/platform/theme/common/themeService';
 import { IWindowService } from 'vs/platform/windows/common/windows';
 import { IWorkspaceEditingService } from 'vs/workbench/services/workspace/common/workspaceEditing';
-import { distinct } from 'vs/base/common/arrays';
 import { IEnvironmentService } from 'vs/platform/environment/common/environment';
 import { getPathLabel } from 'vs/base/common/labels';
 import { extractResources } from 'vs/base/browser/dnd';
@@ -106,14 +106,8 @@ export class FileDataSource implements IDataSource {
 
 				return stat.children;
 			}, (e: any) => {
-				stat.exists = false;
 				stat.hasChildren = false;
-				if (!stat.isRoot) {
-					this.messageService.show(Severity.Error, e);
-				} else {
-					// We render the roots that do not exist differently, nned to do a refresh
-					tree.refresh(stat, false);
-				}
+				this.messageService.show(Severity.Error, e);
 
 				return []; // we could not resolve any children because of an error
 			});
@@ -283,14 +277,27 @@ export class FileRenderer implements IRenderer {
 	private static FILE_TEMPLATE_ID = 'file';
 
 	private state: FileViewletState;
+	private config: IFilesConfiguration;
+	private configListener: IDisposable;
 
 	constructor(
 		state: FileViewletState,
 		@IContextViewService private contextViewService: IContextViewService,
 		@IInstantiationService private instantiationService: IInstantiationService,
-		@IThemeService private themeService: IThemeService
+		@IThemeService private themeService: IThemeService,
+		@IConfigurationService private configurationService: IConfigurationService
 	) {
 		this.state = state;
+		this.config = this.configurationService.getConfiguration<IFilesConfiguration>();
+		this.configListener = this.configurationService.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('explorer')) {
+				this.config = this.configurationService.getConfiguration();
+			}
+		});
+	}
+
+	dispose(): void {
+		this.configListener.dispose();
 	}
 
 	public getHeight(tree: ITree, element: any): number {
@@ -316,12 +323,14 @@ export class FileRenderer implements IRenderer {
 
 		// File Label
 		if (!editableData) {
-			templateData.label.element.style.display = 'block';
+			templateData.label.element.style.display = 'flex';
 			const extraClasses = ['explorer-item'];
-			if (!stat.exists && stat.isRoot) {
-				extraClasses.push('nonexistent-root');
-			}
-			templateData.label.setFile(stat.resource, { hidePath: true, fileKind: stat.isRoot ? FileKind.ROOT_FOLDER : stat.isDirectory ? FileKind.FOLDER : FileKind.FILE, extraClasses });
+			templateData.label.setFile(stat.resource, {
+				hidePath: true,
+				fileKind: stat.isRoot ? FileKind.ROOT_FOLDER : stat.isDirectory ? FileKind.FOLDER : FileKind.FILE,
+				extraClasses,
+				fileDecorations: this.config.explorer.decorations
+			});
 		}
 
 		// Input Box
@@ -350,9 +359,9 @@ export class FileRenderer implements IRenderer {
 		});
 		const styler = attachInputBoxStyler(inputBox, this.themeService);
 
-		const parent = paths.dirname(stat.resource.fsPath);
+		const parent = resources.dirname(stat.resource);
 		inputBox.onDidChange(value => {
-			label.setFile(URI.file(paths.join(parent, value)), labelOptions); // update label icon while typing!
+			label.setFile(parent.with({ path: paths.join(parent.path, value) }), labelOptions); // update label icon while typing!
 		});
 
 		const value = stat.name || '';
@@ -536,6 +545,12 @@ export class FileController extends DefaultController {
 
 	public openEditor(stat: FileStat, options: { preserveFocus: boolean; sideBySide: boolean; pinned: boolean; }): void {
 		if (stat && !stat.isDirectory) {
+			/* __GDPR__
+				"workbenchActionExecuted" : {
+					"id" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+					"from": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+				}
+			*/
 			this.telemetryService.publicLog('workbenchActionExecuted', { id: 'workbench.files.openFile', from: 'explorer' });
 
 			this.editorService.openEditor({ resource: stat.resource, options }, options.sideBySide).done(null, errors.onUnexpectedError);
@@ -554,17 +569,17 @@ export class FileSorter implements ISorter {
 	) {
 		this.toDispose = [];
 
-		this.onConfigurationUpdated(configurationService.getConfiguration<IFilesConfiguration>());
+		this.updateSortOrder();
 
 		this.registerListeners();
 	}
 
 	private registerListeners(): void {
-		this.toDispose.push(this.configurationService.onDidUpdateConfiguration(e => this.onConfigurationUpdated(this.configurationService.getConfiguration<IFilesConfiguration>())));
+		this.toDispose.push(this.configurationService.onDidChangeConfiguration(e => this.updateSortOrder()));
 	}
 
-	private onConfigurationUpdated(configuration: IFilesConfiguration): void {
-		this.sortOrder = configuration && configuration.explorer && configuration.explorer.sortOrder || 'default';
+	private updateSortOrder(): void {
+		this.sortOrder = this.configurationService.getValue('explorer.sortOrder') || 'default';
 	}
 
 	public compare(tree: ITree, statA: FileStat, statB: FileStat): number {
@@ -680,7 +695,7 @@ export class FileFilter implements IFilter {
 	public updateConfiguration(): boolean {
 		let needsRefresh = false;
 		this.contextService.getWorkspace().folders.forEach(folder => {
-			const configuration = this.configurationService.getConfiguration<IFilesConfiguration>(undefined, { resource: folder.uri });
+			const configuration = this.configurationService.getConfiguration<IFilesConfiguration>({ resource: folder.uri });
 			const excludesConfig = (configuration && configuration.files && configuration.files.exclude) || Object.create(null);
 			needsRefresh = needsRefresh || !objects.equals(this.hiddenExpressionPerRoot.get(folder.uri.toString()), excludesConfig);
 			this.hiddenExpressionPerRoot.set(folder.uri.toString(), objects.clone(excludesConfig)); // do not keep the config, as it gets mutated under our hoods
@@ -721,13 +736,15 @@ export class FileFilter implements IFilter {
 
 // Explorer Drag And Drop Controller
 export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
+
+	private static CONFIRM_DND_SETTING_KEY = 'explorer.confirmDragAndDrop';
+
 	private toDispose: IDisposable[];
 	private dropEnabled: boolean;
 
 	constructor(
 		@IMessageService private messageService: IMessageService,
 		@IWorkspaceContextService private contextService: IWorkspaceContextService,
-		@IProgressService private progressService: IProgressService,
 		@IFileService private fileService: IFileService,
 		@IConfigurationService private configurationService: IConfigurationService,
 		@IInstantiationService private instantiationService: IInstantiationService,
@@ -741,7 +758,7 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 
 		this.toDispose = [];
 
-		this.onConfigurationUpdated(configurationService.getConfiguration<IFilesConfiguration>());
+		this.updateDropEnablement();
 
 		this.registerListeners();
 	}
@@ -752,18 +769,18 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 		}
 
 		if (stat.isDirectory) {
-			return URI.from({ scheme: 'folder', path: stat.resource.fsPath }); // indicates that we are dragging a folder
+			return URI.from({ scheme: 'folder', path: stat.resource.path }); // indicates that we are dragging a folder
 		}
 
 		return stat.resource;
 	}
 
 	private registerListeners(): void {
-		this.toDispose.push(this.configurationService.onDidUpdateConfiguration(e => this.onConfigurationUpdated(this.configurationService.getConfiguration<IFilesConfiguration>())));
+		this.toDispose.push(this.configurationService.onDidChangeConfiguration(e => this.updateDropEnablement()));
 	}
 
-	private onConfigurationUpdated(config: IFilesConfiguration): void {
-		this.dropEnabled = config && config.explorer && config.explorer.enableDragAndDrop;
+	private updateDropEnablement(): void {
+		this.dropEnabled = this.configurationService.getValue('explorer.enableDragAndDrop');
 	}
 
 	public onDragStart(tree: ITree, data: IDragAndDropData, originalEvent: DragMouseEvent): void {
@@ -836,11 +853,11 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 					return true; // Can not move anything onto itself
 				}
 
-				if (!isCopy && paths.isEqual(paths.dirname(source.resource.fsPath), target.resource.fsPath)) {
+				if (!isCopy && resources.dirname(source.resource).toString() === target.resource.toString()) {
 					return true; // Can not move a file to the same parent unless we copy
 				}
 
-				if (paths.isEqualOrParent(target.resource.fsPath, source.resource.fsPath, !isLinux /* ignorecase */)) {
+				if (resources.isEqualOrParent(target.resource, source.resource, !isLinux /* ignorecase */)) {
 					return true; // Can not move a parent folder into one of its children
 				}
 
@@ -884,8 +901,6 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 			}
 		}
 
-		this.progressService.showWhile(promise, 800);
-
 		promise.done(null, errors.onUnexpectedError);
 	}
 
@@ -899,38 +914,29 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 			this.windowService.focusWindow();
 
 			// Handle folders by adding to workspace if we are in workspace context
-			const folders = result.filter(result => result.stat.isDirectory).map(result => result.stat.resource);
+			const folders = result.filter(result => result.stat.isDirectory).map(result => ({ uri: result.stat.resource }));
 			if (folders.length > 0) {
-				if (this.environmentService.appQuality === 'stable') {
-					return void 0; // TODO@Ben multi root
+
+				// If we are in no-workspace context, ask for confirmation to create a workspace
+				let confirmed = true;
+				if (this.contextService.getWorkbenchState() !== WorkbenchState.WORKSPACE) {
+					confirmed = this.messageService.confirmSync({
+						message: folders.length > 1 ? nls.localize('dropFolders', "Do you want to add the folders to the workspace?") : nls.localize('dropFolder', "Do you want to add the folder to the workspace?"),
+						type: 'question',
+						primaryButton: folders.length > 1 ? nls.localize('addFolders', "&&Add Folders") : nls.localize('addFolder', "&&Add Folder")
+					});
 				}
 
-				if (this.contextService.getWorkbenchState() === WorkbenchState.WORKSPACE) {
+				if (confirmed) {
 					return this.workspaceEditingService.addFolders(folders);
-				}
-
-				// If we are in single-folder context, ask for confirmation to create a workspace
-				const result = this.messageService.confirm({
-					message: folders.length > 1 ? nls.localize('dropFolders', "Do you want to add the folders to the workspace?") : nls.localize('dropFolder', "Do you want to add the folder to the workspace?"),
-					type: 'question',
-					primaryButton: folders.length > 1 ? nls.localize('addFolders', "&&Add Folders") : nls.localize('addFolder', "&&Add Folder")
-				});
-
-				if (result) {
-					const currentFolders = this.contextService.getWorkspace().folders.map(folder => folder.uri);
-					const newRoots = [...currentFolders, ...folders];
-
-					// Create and open workspace
-					return this.workspaceEditingService.createAndEnterWorkspace(distinct(newRoots.map(root => root.fsPath)));
 				}
 			}
 
 			// Handle dropped files (only support FileStat as target)
 			else if (target instanceof FileStat) {
 				const importAction = this.instantiationService.createInstance(ImportFileAction, tree, target, null);
-				return importAction.run({
-					input: { paths: droppedResources.map(res => res.resource.fsPath) }
-				});
+
+				return importAction.run(droppedResources.map(res => res.resource));
 			}
 
 			return void 0;
@@ -941,6 +947,42 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 		const source: FileStat = data.getData()[0];
 		const isCopy = (originalEvent.ctrlKey && !isMacintosh) || (originalEvent.altKey && isMacintosh);
 
+		let confirmPromise: TPromise<IConfirmationResult>;
+
+		// Handle confirm setting
+		const confirmDragAndDrop = !isCopy && this.configurationService.getValue<boolean>(FileDragAndDrop.CONFIRM_DND_SETTING_KEY);
+		if (confirmDragAndDrop) {
+			confirmPromise = this.messageService.confirm({
+				message: nls.localize('confirmMove', "Are you sure you want to move '{0}'?", source.name),
+				checkbox: {
+					label: nls.localize('doNotAskAgain', "Do not ask me again")
+				},
+				type: 'question',
+				primaryButton: nls.localize({ key: 'moveButtonLabel', comment: ['&& denotes a mnemonic'] }, "&&Move")
+			});
+		} else {
+			confirmPromise = TPromise.as({ confirmed: true } as IConfirmationResult);
+		}
+
+		return confirmPromise.then(confirmation => {
+
+			// Check for confirmation checkbox
+			let updateConfirmSettingsPromise: TPromise<void> = TPromise.as(void 0);
+			if (confirmation.confirmed && confirmation.checkboxChecked === true) {
+				updateConfirmSettingsPromise = this.configurationService.updateValue(FileDragAndDrop.CONFIRM_DND_SETTING_KEY, false, ConfigurationTarget.USER);
+			}
+
+			return updateConfirmSettingsPromise.then(() => {
+				if (confirmation.confirmed) {
+					return this.doHandleExplorerDrop(tree, data, source, target, isCopy);
+				}
+
+				return TPromise.as(void 0);
+			});
+		});
+	}
+
+	private doHandleExplorerDrop(tree: ITree, data: IDragAndDropData, source: FileStat, target: FileStat, isCopy: boolean): TPromise<void> {
 		return tree.expand(target).then(() => {
 
 			// Reuse duplicate action if user copies
@@ -962,18 +1004,18 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 			};
 
 			// 1. check for dirty files that are being moved and backup to new target
-			const dirty = this.textFileService.getDirty().filter(d => paths.isEqualOrParent(d.fsPath, source.resource.fsPath, !isLinux /* ignorecase */));
+			const dirty = this.textFileService.getDirty().filter(d => resources.isEqualOrParent(d, source.resource, !isLinux /* ignorecase */));
 			return TPromise.join(dirty.map(d => {
 				let moved: URI;
 
 				// If the dirty file itself got moved, just reparent it to the target folder
-				if (paths.isEqual(source.resource.fsPath, d.fsPath)) {
-					moved = URI.file(paths.join(target.resource.fsPath, source.name));
+				if (source.resource.toString() === d.toString()) {
+					moved = target.resource.with({ path: paths.join(target.resource.path, source.name) });
 				}
 
 				// Otherwise, a parent of the dirty resource got moved, so we have to reparent more complicated. Example:
 				else {
-					moved = URI.file(paths.join(target.resource.fsPath, d.fsPath.substr(source.parent.resource.fsPath.length + 1)));
+					moved = target.resource.with({ path: paths.join(target.resource.path, d.path.substr(source.parent.resource.path.length + 1)) });
 				}
 
 				dirtyMoved.push(moved);
@@ -988,7 +1030,7 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 
 				// 3.) run the move operation
 				.then(() => {
-					const targetResource = URI.file(paths.join(target.resource.fsPath, source.name));
+					const targetResource = target.resource.with({ path: paths.join(target.resource.path, source.name) });
 					let didHandleConflict = false;
 
 					return this.fileService.moveFile(source.resource, targetResource).then(null, error => {
@@ -1005,8 +1047,8 @@ export class FileDragAndDrop extends SimpleFileResourceDragAndDrop {
 							};
 
 							// Move with overwrite if the user confirms
-							if (this.messageService.confirm(confirm)) {
-								const targetDirty = this.textFileService.getDirty().filter(d => paths.isEqualOrParent(d.fsPath, targetResource.fsPath, !isLinux /* ignorecase */));
+							if (this.messageService.confirmSync(confirm)) {
+								const targetDirty = this.textFileService.getDirty().filter(d => resources.isEqualOrParent(d, targetResource, !isLinux /* ignorecase */));
 
 								// Make sure to revert all dirty in target first to be able to overwrite properly
 								return this.textFileService.revertAll(targetDirty, { soft: true /* do not attempt to load content from disk */ }).then(() => {

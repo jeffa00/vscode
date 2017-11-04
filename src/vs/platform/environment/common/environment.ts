@@ -41,7 +41,11 @@ export interface ParsedArgs {
 	'open-url'?: string | string[];
 	'skip-getting-started'?: boolean;
 	'sticky-quickopen'?: boolean;
+	'disable-telemetry'?: boolean;
 	'export-default-configuration'?: string;
+	'install-source'?: string;
+	'disable-updates'?: string;
+	'disable-crash-reporter'?: string;
 }
 
 export const IEnvironmentService = createDecorator<IEnvironmentService>('environmentService');
@@ -102,4 +106,8 @@ export interface IEnvironmentService {
 	sharedIPCHandle: string;
 
 	nodeCachedDataDir: string;
+
+	installSource: string;
+	disableUpdates: boolean;
+	disableCrashReporter: boolean;
 }

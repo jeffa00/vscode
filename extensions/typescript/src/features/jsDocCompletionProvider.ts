@@ -6,17 +6,13 @@
 import { Position, Range, CompletionItemProvider, CompletionItemKind, TextDocument, CancellationToken, CompletionItem, window, Uri, ProviderResult, TextEditor, SnippetString, workspace } from 'vscode';
 
 import { ITypescriptServiceClient } from '../typescriptService';
-import { FileLocationRequestArgs, DocCommandTemplateResponse } from '../protocol';
+import { DocCommandTemplateResponse } from '../protocol';
 
 import * as nls from 'vscode-nls';
+import { vsPositionToTsFileLocation } from '../utils/convert';
 const localize = nls.loadMessageBundle();
 
 const configurationNamespace = 'jsDocCompletion';
-
-
-interface Configuration {
-	enabled: boolean;
-}
 
 namespace Configuration {
 	export const enabled = 'enabled';
@@ -50,20 +46,16 @@ class JsDocCompletionItem extends CompletionItem {
 }
 
 export class JsDocCompletionProvider implements CompletionItemProvider {
-	private config: Configuration;
 
 	constructor(
 		private client: ITypescriptServiceClient,
-	) {
-		this.config = { enabled: true };
-	}
+	) { }
 
-	public updateConfiguration(): void {
-		const jsDocCompletionConfig = workspace.getConfiguration(configurationNamespace);
-		this.config.enabled = jsDocCompletionConfig.get(Configuration.enabled, true);
-	}
-
-	public provideCompletionItems(document: TextDocument, position: Position, _token: CancellationToken): ProviderResult<CompletionItem[]> {
+	public provideCompletionItems(
+		document: TextDocument,
+		position: Position,
+		_token: CancellationToken
+	): ProviderResult<CompletionItem[]> {
 		const file = this.client.normalizePath(document.uri);
 		if (!file) {
 			return [];
@@ -74,7 +66,8 @@ export class JsDocCompletionProvider implements CompletionItemProvider {
 		const line = document.lineAt(position.line).text;
 		const prefix = line.slice(0, position.character);
 		if (prefix.match(/^\s*$|\/\*\*\s*$|^\s*\/\*\*+\s*$/)) {
-			return [new JsDocCompletionItem(document, position, this.config.enabled)];
+			const enableJsDocCompletions = workspace.getConfiguration(configurationNamespace).get<boolean>(Configuration.enabled, true);
+			return [new JsDocCompletionItem(document, position, enableJsDocCompletions)];
 		}
 		return [];
 	}
@@ -118,14 +111,10 @@ export class TryCompleteJsDocCommand {
 	}
 
 	private tryInsertJsDocFromTemplate(editor: TextEditor, file: string, position: Position): Promise<boolean> {
-		const args: FileLocationRequestArgs = {
-			file: file,
-			line: position.line + 1,
-			offset: position.character + 1
-		};
+		const args = vsPositionToTsFileLocation(file, position);
 		return Promise.race([
 			this.lazyClient().execute('docCommentTemplate', args),
-			new Promise((_, reject) => setTimeout(reject, 250))
+			new Promise<DocCommandTemplateResponse>((_, reject) => setTimeout(reject, 250))
 		]).then((res: DocCommandTemplateResponse) => {
 			if (!res || !res.body) {
 				return false;

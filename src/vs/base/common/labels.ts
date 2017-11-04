@@ -37,6 +37,10 @@ export function getPathLabel(resource: URI | string, rootProvider?: IWorkspaceFo
 		resource = URI.file(resource);
 	}
 
+	if (resource.scheme !== 'file' && resource.scheme !== 'untitled') {
+		return resource.authority + resource.path;
+	}
+
 	// return early if we can resolve a relative path label from the root
 	const baseResource = rootProvider ? rootProvider.getWorkspaceFolder(resource) : null;
 	if (baseResource) {

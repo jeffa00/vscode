@@ -174,7 +174,8 @@ class MainThreadSCMProvider implements ISCMProvider {
 			const group = this._groupsByHandle[groupHandle];
 
 			if (!group) {
-				return;
+				console.warn(`SCM group ${groupHandle} not found in provider ${this.label}`);
+				continue;
 			}
 
 			// reverse the splices sequence in order to apply them correctly
@@ -182,7 +183,7 @@ class MainThreadSCMProvider implements ISCMProvider {
 
 			for (const [start, deleteCount, rawResources] of groupSlices) {
 				const resources = rawResources.map(rawResource => {
-					const [handle, sourceUri, icons, tooltip, strikeThrough, faded] = rawResource;
+					const [handle, sourceUri, icons, tooltip, strikeThrough, faded, source, letter, color] = rawResource;
 					const icon = icons[0];
 					const iconDark = icons[1] || icon;
 					const decorations = {
@@ -190,7 +191,10 @@ class MainThreadSCMProvider implements ISCMProvider {
 						iconDark: iconDark && URI.parse(iconDark),
 						tooltip,
 						strikeThrough,
-						faded
+						faded,
+						source,
+						letter,
+						color: color && color.id
 					};
 
 					return new MainThreadSCMResource(

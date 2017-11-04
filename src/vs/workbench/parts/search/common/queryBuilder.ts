@@ -46,7 +46,7 @@ export class QueryBuilder {
 		let excludePattern = this.parseExcludePattern(options.excludePattern);
 
 		// Build folderQueries from searchPaths, if given, otherwise folderResources
-		let folderQueries = folderResources && folderResources.map(uri => this.getFolderQueryForRoot(uri, options));
+		let folderQueries = folderResources && folderResources.map(uri => this.getFolderQueryForRoot(uri, type === QueryType.File, options));
 		if (searchPaths && searchPaths.length) {
 			const allRootExcludes = folderQueries && this.mergeExcludesFromFolderQueries(folderQueries);
 			folderQueries = searchPaths.map(searchPath => this.getFolderQueryForSearchPath(searchPath));
@@ -55,10 +55,12 @@ export class QueryBuilder {
 			}
 		}
 
-		const useRipgrep = type === QueryType.File ? options.useRipgrep : !folderResources || folderResources.every(folder => {
-			const folderConfig = this.configurationService.getConfiguration<ISearchConfiguration>(undefined, { resource: folder });
+		const useRipgrep = !folderResources || folderResources.every(folder => {
+			const folderConfig = this.configurationService.getConfiguration<ISearchConfiguration>({ resource: folder });
 			return folderConfig.search.useRipgrep;
 		});
+
+		const ignoreSymlinks = !this.configurationService.getConfiguration<ISearchConfiguration>().search.followSymlinks;
 
 		const query = <ISearchQuery>{
 			type,
@@ -74,7 +76,8 @@ export class QueryBuilder {
 			contentPattern: contentPattern,
 			useRipgrep,
 			disregardIgnoreFiles: options.disregardIgnoreFiles,
-			disregardExcludeSettings: options.disregardExcludeSettings
+			disregardExcludeSettings: options.disregardExcludeSettings,
+			ignoreSymlinks
 		};
 
 		// Filter extraFileResources against global include/exclude patterns - they are already expected to not belong to a workspace
@@ -195,7 +198,7 @@ export class QueryBuilder {
 			const pathPortions = this.expandAbsoluteSearchPaths(pathPortion);
 			return pathPortions.map(searchPath => {
 				return <ISearchPathPattern>{
-					searchPath: uri.file(searchPath),
+					searchPath,
 					pattern: globPortion
 				};
 			});
@@ -207,14 +210,15 @@ export class QueryBuilder {
 	/**
 	 * Takes a searchPath like `./a/foo` and expands it to absolute paths for all the workspaces it matches.
 	 */
-	private expandAbsoluteSearchPaths(searchPath: string): string[] {
+	private expandAbsoluteSearchPaths(searchPath: string): uri[] {
 		if (paths.isAbsolute(searchPath)) {
-			return [paths.normalize(searchPath)];
+			// Currently only local resources can be searched for with absolute search paths
+			return [uri.file(paths.normalize(searchPath))];
 		}
 
 		if (this.workspaceContextService.getWorkbenchState() === WorkbenchState.FOLDER) { // TODO: @Sandy Try checking workspace folders length instead.
-			return [paths.normalize(
-				paths.join(this.workspaceContextService.getWorkspace().folders[0].uri.fsPath, searchPath))];
+			const workspaceUri = this.workspaceContextService.getWorkspace().folders[0].uri;
+			return [workspaceUri.with({ path: paths.normalize(paths.join(workspaceUri.path, searchPath)) })];
 		} else if (searchPath === './') {
 			return []; // ./ or ./**/foo makes sense for single-folder but not multi-folder workspaces
 		} else {
@@ -225,8 +229,8 @@ export class QueryBuilder {
 				if (matchingRoots.length) {
 					return matchingRoots.map(root => {
 						return relativeSearchPathMatch[2] ?
-							paths.normalize(paths.join(root.uri.fsPath, relativeSearchPathMatch[2])) :
-							root.uri.fsPath;
+							root.uri.with({ path: paths.normalize(paths.join(root.uri.path, relativeSearchPathMatch[2])) }) :
+							root.uri;
 					});
 				} else {
 					// No root folder with name
@@ -243,7 +247,7 @@ export class QueryBuilder {
 
 	private getFolderQueryForSearchPath(searchPath: ISearchPathPattern): IFolderQuery {
 		const folder = searchPath.searchPath;
-		const folderConfig = this.configurationService.getConfiguration<ISearchConfiguration>(undefined, { resource: folder });
+		const folderConfig = this.configurationService.getConfiguration<ISearchConfiguration>({ resource: folder });
 		return <IFolderQuery>{
 			folder,
 			includePattern: searchPath.pattern && patternListToIExpression([searchPath.pattern]),
@@ -251,12 +255,13 @@ export class QueryBuilder {
 		};
 	}
 
-	private getFolderQueryForRoot(folder: uri, options?: IQueryOptions): IFolderQuery {
-		const folderConfig = this.configurationService.getConfiguration<ISearchConfiguration>(undefined, { resource: folder });
+	private getFolderQueryForRoot(folder: uri, perFolderUseIgnoreFiles: boolean, options?: IQueryOptions): IFolderQuery {
+		const folderConfig = this.configurationService.getConfiguration<ISearchConfiguration>({ resource: folder });
 		return <IFolderQuery>{
 			folder,
 			excludePattern: this.getExcludesForFolder(folderConfig, options),
-			fileEncoding: folderConfig.files && folderConfig.files.encoding
+			fileEncoding: folderConfig.files && folderConfig.files.encoding,
+			disregardIgnoreFiles: perFolderUseIgnoreFiles ? !folderConfig.search.useIgnoreFiles : undefined
 		};
 	}
 }

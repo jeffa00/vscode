@@ -14,7 +14,7 @@ import { ICodeEditor } from 'vs/editor/browser/editorBrowser';
 import { getHover } from '../common/hover';
 import { HoverOperation, IHoverComputer } from './hoverOperation';
 import { ContentHoverWidget } from './hoverWidgets';
-import { IMarkdownString, MarkdownString, isEmptyMarkdownString } from 'vs/base/common/htmlContent';
+import { IMarkdownString, MarkdownString, isEmptyMarkdownString, markedStringsEquals } from 'vs/base/common/htmlContent';
 import { MarkdownRenderer } from 'vs/editor/contrib/markdown/browser/markdownRenderer';
 import { ModelDecorationOptions } from 'vs/editor/common/model/textModelWithDecorations';
 import { ColorPickerModel } from 'vs/editor/contrib/colorPicker/browser/colorPickerModel';
@@ -96,8 +96,8 @@ class ModesContentComputer implements IHoverComputer<HoverPart[]> {
 			if (!didFindColor && colorData) {
 				didFindColor = true;
 
-				const { color } = colorData.colorInfo;
-				return new ColorHover(d.range, color, colorData.provider);
+				const { color, range } = colorData.colorInfo;
+				return new ColorHover(range, color, colorData.provider);
 			} else {
 				if (isEmptyMarkdownString(d.options.hoverMessage)) {
 					return null;
@@ -243,6 +243,9 @@ export class ModesContentHoverWidget extends ContentHoverWidget {
 					}
 				}
 				if (filteredMessages.length > 0) {
+					if (hoverContentsEquals(filteredMessages, this._messages)) {
+						return;
+					}
 					this._renderMessages(range, filteredMessages);
 				} else {
 					this.hide();
@@ -325,7 +328,7 @@ export class ModesContentHoverWidget extends ContentHoverWidget {
 				const model = new ColorPickerModel(color, [], 0);
 				const widget = new ColorPickerWidget(fragment, model, this._editor.getConfiguration().pixelRatio);
 
-				getColorPresentations(colorInfo, msg.provider).then(colorPresentations => {
+				getColorPresentations(editorModel, colorInfo, msg.provider).then(colorPresentations => {
 					model.colorPresentations = colorPresentations;
 					const originalText = this._editor.getModel().getValueInRange(msg.range);
 					model.guessColorPresentation(color, originalText);
@@ -335,7 +338,6 @@ export class ModesContentHoverWidget extends ContentHoverWidget {
 						let newRange;
 						if (model.presentation.textEdit) {
 							textEdits = [model.presentation.textEdit];
-							console.log('insert text');
 							newRange = new Range(
 								model.presentation.textEdit.range.startLineNumber,
 								model.presentation.textEdit.range.startColumn,
@@ -360,7 +362,7 @@ export class ModesContentHoverWidget extends ContentHoverWidget {
 					};
 
 					const updateColorPresentations = (color: Color) => {
-						return getColorPresentations({
+						return getColorPresentations(editorModel, {
 							range: range,
 							color: {
 								red: color.rgba.r / 255,
@@ -406,4 +408,24 @@ export class ModesContentHoverWidget extends ContentHoverWidget {
 	private static _DECORATION_OPTIONS = ModelDecorationOptions.register({
 		className: 'hoverHighlight'
 	});
+}
+
+function hoverContentsEquals(first: HoverPart[], second: HoverPart[]): boolean {
+	if ((!first && second) || (first && !second) || first.length !== second.length) {
+		return false;
+	}
+	for (let i = 0; i < first.length; i++) {
+		const firstElement = first[i];
+		const secondElement = second[i];
+		if (firstElement instanceof ColorHover) {
+			return false;
+		}
+		if (secondElement instanceof ColorHover) {
+			return false;
+		}
+		if (!markedStringsEquals(firstElement.contents, secondElement.contents)) {
+			return false;
+		}
+	}
+	return true;
 }

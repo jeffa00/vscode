@@ -8,7 +8,32 @@ import parse from '@emmetio/html-matcher';
 import parseStylesheet from '@emmetio/css-parser';
 import { Node, HtmlNode, CssToken, Property } from 'EmmetNode';
 import { DocumentStreamReader } from './bufferStream';
-import { isStyleSheet } from 'vscode-emmet-helper';
+import * as path from 'path';
+
+let _emmetHelper;
+let _currentExtensionsPath = undefined;
+
+export function getEmmetHelper() {
+	if (!_emmetHelper) {
+		_emmetHelper = require('vscode-emmet-helper');
+	}
+	resolveUpdateExtensionsPath();
+	return _emmetHelper;
+}
+
+export function resolveUpdateExtensionsPath() {
+	if (!_emmetHelper) {
+		return;
+	}
+	let extensionsPath = vscode.workspace.getConfiguration('emmet')['extensionsPath'];
+	if (extensionsPath && !path.isAbsolute(extensionsPath)) {
+		extensionsPath = path.join(vscode.workspace.rootPath, extensionsPath);
+	}
+	if (_currentExtensionsPath !== extensionsPath) {
+		_currentExtensionsPath = extensionsPath;
+		_emmetHelper.updateExtensionsPath(_currentExtensionsPath).then(null, err => vscode.window.showErrorMessage(err));
+	}
+}
 
 export const LANGUAGE_MODES: Object = {
 	'html': ['!', '.', '}', ':', '*', '$', ']', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
@@ -17,14 +42,16 @@ export const LANGUAGE_MODES: Object = {
 	'haml': ['!', '.', '}', ':', '*', '$', ']', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
 	'xml': ['.', '}', '*', '$', ']', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
 	'xsl': ['!', '.', '}', '*', '$', ']', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
-	'css': [':', ';'],
-	'scss': [':', ';'],
-	'sass': [':'],
-	'less': [':', ';'],
-	'stylus': [':'],
+	'css': [':', ';', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
+	'scss': [':', ';', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
+	'sass': [':', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
+	'less': [':', ';', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
+	'stylus': [':', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
 	'javascriptreact': ['.', '}', '*', '$', ']', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
 	'typescriptreact': ['.', '}', '*', '$', ']', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 };
+
+const emmetModes = ['html', 'pug', 'slim', 'haml', 'xml', 'xsl', 'jsx', 'css', 'scss', 'sass', 'less', 'stylus'];
 
 // Explicitly map languages that have built-in grammar in VS Code to their parent language
 // to get emmet completion support
@@ -34,6 +61,11 @@ export const MAPPED_MODES: Object = {
 	'handlebars': 'html',
 	'php': 'html'
 };
+
+export function isStyleSheet(syntax): boolean {
+	let stylesheetSyntaxes = ['css', 'scss', 'sass', 'less', 'stylus'];
+	return (stylesheetSyntaxes.indexOf(syntax) > -1);
+}
 
 export function validate(allowStylesheet: boolean = true): boolean {
 	let editor = vscode.window.activeTextEditor;
@@ -57,6 +89,33 @@ export function getMappingForIncludedLanguages(): any {
 		}
 	});
 	return finalMappedModes;
+}
+
+/**
+* Get the corresponding emmet mode for given vscode language mode
+* Eg: jsx for typescriptreact/javascriptreact or pug for jade
+* If the language is not supported by emmet or has been exlcuded via `exlcudeLanguages` setting, 
+* then nothing is returned
+* 
+* @param language 
+* @param exlcudedLanguages Array of language ids that user has chosen to exlcude for emmet
+*/
+export function getEmmetMode(language: string, excludedLanguages: string[]): string {
+	if (!language || excludedLanguages.indexOf(language) > -1) {
+		return;
+	}
+	if (/\b(typescriptreact|javascriptreact|jsx-tags)\b/.test(language)) { // treat tsx like jsx
+		return 'jsx';
+	}
+	if (language === 'sass-indented') { // map sass-indented to sass
+		return 'sass';
+	}
+	if (language === 'jade') {
+		return 'pug';
+	}
+	if (emmetModes.indexOf(language) > -1) {
+		return language;
+	}
 }
 
 /**

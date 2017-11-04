@@ -15,9 +15,9 @@ import * as json from 'vs/base/common/json';
 import { ActionItem, IActionItem, Separator } from 'vs/base/browser/ui/actionbar/actionbar';
 import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { IDisposable, dispose } from 'vs/base/common/lifecycle';
-import { IExtension, ExtensionState, IExtensionsWorkbenchService, VIEWLET_ID, IExtensionsViewlet } from 'vs/workbench/parts/extensions/common/extensions';
+import { IExtension, ExtensionState, IExtensionsWorkbenchService, VIEWLET_ID, IExtensionsViewlet, AutoUpdateConfigurationKey } from 'vs/workbench/parts/extensions/common/extensions';
 import { ExtensionsConfigurationInitialContent } from 'vs/workbench/parts/extensions/common/extensionsFileTemplate';
-import { LocalExtensionType, IExtensionEnablementService } from 'vs/platform/extensionManagement/common/extensionManagement';
+import { LocalExtensionType, IExtensionEnablementService, IExtensionTipsService } from 'vs/platform/extensionManagement/common/extensionManagement';
 import { areSameExtensions } from 'vs/platform/extensionManagement/common/extensionManagementUtil';
 import { IInstantiationService, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 import { IMessageService } from 'vs/platform/message/common/message';
@@ -26,19 +26,21 @@ import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
 import { IWorkbenchEditorService } from 'vs/workbench/services/editor/common/editorService';
 import { Query } from 'vs/workbench/parts/extensions/common/extensionQuery';
 import { IFileService, IContent } from 'vs/platform/files/common/files';
-import { IWorkspaceContextService, WorkbenchState } from 'vs/platform/workspace/common/workspace';
+import { IWorkspaceContextService, WorkbenchState, IWorkspaceFolder } from 'vs/platform/workspace/common/workspace';
 import { IWindowService } from 'vs/platform/windows/common/windows';
 import { IExtensionService, IExtensionDescription } from 'vs/platform/extensions/common/extensions';
 import URI from 'vs/base/common/uri';
-import { CommandsRegistry } from 'vs/platform/commands/common/commands';
+import { CommandsRegistry, ICommandService } from 'vs/platform/commands/common/commands';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { registerThemingParticipant, ITheme, ICssStyleCollector } from 'vs/platform/theme/common/themeService';
 import { buttonBackground, buttonForeground, buttonHoverBackground, contrastBorder, registerColor, foreground } from 'vs/platform/theme/common/colorRegistry';
 import { Color } from 'vs/base/common/color';
-import { IPickOpenEntry, IQuickOpenService } from 'vs/platform/quickOpen/common/quickOpen';
 import { IJSONEditingService } from 'vs/workbench/services/configuration/common/jsonEditing';
 import { ITextEditorSelection } from 'vs/platform/editor/common/editor';
 import { ITextModelService } from 'vs/editor/common/services/resolverService';
+import { PICK_WORKSPACE_FOLDER_COMMAND } from 'vs/workbench/browser/actions/workspaceActions';
+import Severity from 'vs/base/common/severity';
+import { PagedModel } from 'vs/base/common/paging';
 
 export class InstallAction extends Action {
 
@@ -75,13 +77,16 @@ export class InstallAction extends Action {
 		if (this.extension.state === ExtensionState.Installing) {
 			this.label = InstallAction.InstallingLabel;
 			this.class = InstallAction.InstallingClass;
+			this.tooltip = InstallAction.InstallingLabel;
 		} else {
 			this.label = InstallAction.InstallLabel;
 			this.class = InstallAction.Class;
+			this.tooltip = InstallAction.InstallLabel;
 		}
 	}
 
 	run(): TPromise<any> {
+		this.extensionsWorkbenchService.open(this.extension);
 		return this.extensionsWorkbenchService.install(this.extension);
 	}
 
@@ -194,22 +199,27 @@ export class CombinedInstallAction extends Action {
 			this.enabled = true;
 			this.label = this.installAction.label;
 			this.class = this.installAction.class;
+			this.tooltip = this.installAction.tooltip;
 		} else if (this.uninstallAction.enabled) {
 			this.enabled = true;
 			this.label = this.uninstallAction.label;
 			this.class = this.uninstallAction.class;
+			this.tooltip = this.uninstallAction.tooltip;
 		} else if (this.extension.state === ExtensionState.Installing) {
 			this.enabled = false;
 			this.label = this.installAction.label;
 			this.class = this.installAction.class;
+			this.tooltip = this.installAction.tooltip;
 		} else if (this.extension.state === ExtensionState.Uninstalling) {
 			this.enabled = false;
 			this.label = this.uninstallAction.label;
 			this.class = this.uninstallAction.class;
+			this.tooltip = this.uninstallAction.tooltip;
 		} else {
 			this.enabled = false;
 			this.label = this.installAction.label;
 			this.class = this.installAction.class;
+			this.tooltip = this.installAction.tooltip;
 		}
 	}
 
@@ -429,7 +439,7 @@ export class EnableForWorkspaceAction extends Action implements IExtensionAction
 	private update(): void {
 		this.enabled = false;
 		if (this.extension) {
-			this.enabled = !this.extension.disabledGlobally && this.extension.disabledForWorkspace && this.extensionEnablementService.canEnable(this.extension.id);
+			this.enabled = !this.extension.disabledGlobally && this.extension.disabledForWorkspace && this.extensionEnablementService.canEnable(this.extension);
 		}
 	}
 
@@ -468,7 +478,7 @@ export class EnableGloballyAction extends Action implements IExtensionAction {
 	private update(): void {
 		this.enabled = false;
 		if (this.extension) {
-			this.enabled = this.extension.disabledGlobally && this.extensionEnablementService.canEnable(this.extension.id);
+			this.enabled = this.extension.disabledGlobally && this.extensionEnablementService.canEnable(this.extension);
 		}
 	}
 
@@ -524,7 +534,7 @@ export class EnableAction extends Action {
 			return;
 		}
 
-		this.enabled = this.extension.state === ExtensionState.Installed && (this.extension.disabledGlobally || this.extension.disabledForWorkspace) && this.extensionEnablementService.canEnable(this.extension.id);
+		this.enabled = this.extension.state === ExtensionState.Installed && (this.extension.disabledGlobally || this.extension.disabledForWorkspace) && this.extensionEnablementService.canEnable(this.extension);
 		this.class = this.enabled ? EnableAction.EnabledClass : EnableAction.DisabledClass;
 	}
 
@@ -697,20 +707,19 @@ export class ToggleAutoUpdateAction extends Action {
 		id: string,
 		label: string,
 		private autoUpdateValue: boolean,
-		@IConfigurationService configurationService: IConfigurationService,
-		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService
+		@IConfigurationService private configurationService: IConfigurationService
 	) {
 		super(id, label, '', true);
 		this.updateEnablement();
-		configurationService.onDidUpdateConfiguration(() => this.updateEnablement());
+		configurationService.onDidChangeConfiguration(() => this.updateEnablement());
 	}
 
 	private updateEnablement(): void {
-		this.enabled = this.extensionsWorkbenchService.isAutoUpdateEnabled !== this.autoUpdateValue;
+		this.enabled = this.configurationService.getValue(AutoUpdateConfigurationKey) !== this.autoUpdateValue;
 	}
 
 	run(): TPromise<any> {
-		return this.extensionsWorkbenchService.setAutoUpdate(this.autoUpdateValue);
+		return this.configurationService.updateValue(AutoUpdateConfigurationKey, this.autoUpdateValue);
 	}
 }
 
@@ -722,10 +731,9 @@ export class EnableAutoUpdateAction extends ToggleAutoUpdateAction {
 	constructor(
 		id = EnableAutoUpdateAction.ID,
 		label = EnableAutoUpdateAction.LABEL,
-		@IConfigurationService configurationService: IConfigurationService,
-		@IExtensionsWorkbenchService extensionsWorkbenchService: IExtensionsWorkbenchService
+		@IConfigurationService configurationService: IConfigurationService
 	) {
-		super(id, label, true, configurationService, extensionsWorkbenchService);
+		super(id, label, true, configurationService);
 	}
 }
 
@@ -737,10 +745,9 @@ export class DisableAutoUpdateAction extends ToggleAutoUpdateAction {
 	constructor(
 		id = EnableAutoUpdateAction.ID,
 		label = EnableAutoUpdateAction.LABEL,
-		@IConfigurationService configurationService: IConfigurationService,
-		@IExtensionsWorkbenchService extensionsWorkbenchService: IExtensionsWorkbenchService
+		@IConfigurationService configurationService: IConfigurationService
 	) {
-		super(id, label, false, configurationService, extensionsWorkbenchService);
+		super(id, label, false, configurationService);
 	}
 }
 
@@ -871,10 +878,7 @@ export class ReloadAction extends Action {
 	}
 
 	run(): TPromise<any> {
-		if (this.messageService.confirm({ message: this.reloadMessaage, type: 'question', primaryButton: localize('reload', "&&Reload Window") })) {
-			return this.windowService.reloadWindow();
-		}
-		return TPromise.wrap(null);
+		return this.windowService.reloadWindow();
 	}
 }
 
@@ -1088,39 +1092,79 @@ export class ShowRecommendedExtensionsAction extends Action {
 	}
 }
 
-export class ShowWorkspaceRecommendedExtensionsAction extends Action {
+export class InstallWorkspaceRecommendedExtensionsAction extends Action {
 
-	static ID = 'workbench.extensions.action.showWorkspaceRecommendedExtensions';
-	static LABEL = localize('showWorkspaceRecommendedExtensions', "Show Workspace Recommended Extensions");
+	static ID = 'workbench.extensions.action.installWorkspaceRecommendedExtensions';
+	static LABEL = localize('installWorkspaceRecommendedExtensions', "Install All Workspace Recommended Extensions");
 
 	private disposables: IDisposable[] = [];
 
 	constructor(
-		id: string,
-		label: string,
+		id: string = InstallWorkspaceRecommendedExtensionsAction.ID,
+		label: string = InstallWorkspaceRecommendedExtensionsAction.LABEL,
 		@IWorkspaceContextService private contextService: IWorkspaceContextService,
-		@IViewletService private viewletService: IViewletService
+		@IViewletService private viewletService: IViewletService,
+		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService,
+		@IExtensionTipsService private extensionTipsService: IExtensionTipsService,
+		@IMessageService private messageService: IMessageService
 	) {
-		super(id, label, null);
+		super(id, label, 'extension-action');
+		this.extensionsWorkbenchService.onChange(() => this.update(), this, this.disposables);
 		this.contextService.onDidChangeWorkbenchState(() => this.update(), this, this.disposables);
-		this.update();
 	}
 
 	private update(): void {
 		this.enabled = this.contextService.getWorkbenchState() !== WorkbenchState.EMPTY;
+		if (this.enabled) {
+			this.extensionTipsService.getWorkspaceRecommendations().then(names => {
+				const installed = this.extensionsWorkbenchService.local.map(x => x.id.toLowerCase());
+				this.enabled = names.some(x => installed.indexOf(x.toLowerCase()) === -1);
+			});
+		}
 	}
 
-	run(): TPromise<void> {
-		return this.viewletService.openViewlet(VIEWLET_ID, true)
-			.then(viewlet => viewlet as IExtensionsViewlet)
-			.then(viewlet => {
-				viewlet.search('@recommended:workspace ');
-				viewlet.focus();
-			});
+	run(): TPromise<any> {
+		return this.extensionTipsService.getWorkspaceRecommendations().then(names => {
+			const installed = this.extensionsWorkbenchService.local.map(x => x.id.toLowerCase());
+			const toInstall = names.filter(x => installed.indexOf(x.toLowerCase()) === -1);
+
+			return this.viewletService.openViewlet(VIEWLET_ID, true)
+				.then(viewlet => viewlet as IExtensionsViewlet)
+				.then(viewlet => {
+					if (!toInstall.length) {
+						this.enabled = false;
+						this.messageService.show(Severity.Info, localize('allExtensionsInstalled', "All extensions recommended for this workspace have already been installed"));
+						viewlet.focus();
+						return TPromise.as(null);
+					}
+
+					viewlet.search('@recommended');
+					viewlet.focus();
+
+					return this.extensionsWorkbenchService.queryGallery({ names: toInstall, source: 'install-all-workspace-recommendations' }).then(pager => {
+						let installPromises = [];
+						let model = new PagedModel(pager);
+						let extensionsWithDependencies = [];
+						for (let i = 0; i < pager.total; i++) {
+							installPromises.push(model.resolve(i).then(e => {
+								if (e.dependencies && e.dependencies.length > 0) {
+									extensionsWithDependencies.push(e);
+									return TPromise.as(null);
+								} else {
+									return this.extensionsWorkbenchService.install(e);
+								}
+							}));
+						}
+						return TPromise.join(installPromises).then(() => {
+							return TPromise.join(extensionsWithDependencies.map(e => this.extensionsWorkbenchService.install(e)));
+						});
+					});
+				});
+		});
 	}
 
 	protected isEnabled(): boolean {
-		return true;
+		return this.enabled;
 	}
 
 	dispose(): void {
@@ -1128,6 +1172,53 @@ export class ShowWorkspaceRecommendedExtensionsAction extends Action {
 		super.dispose();
 	}
 }
+
+export class InstallRecommendedExtensionAction extends Action {
+
+	static ID = 'workbench.extensions.action.installRecommendedExtension';
+	static LABEL = localize('installRecommendedExtension', "Install Recommended Extension");
+
+	private extensionId: string;
+
+	constructor(
+		extensionId: string,
+		@IViewletService private viewletService: IViewletService,
+		@IExtensionsWorkbenchService private extensionsWorkbenchService: IExtensionsWorkbenchService,
+		@IMessageService private messageService: IMessageService
+	) {
+		super(InstallRecommendedExtensionAction.ID, InstallRecommendedExtensionAction.LABEL, null);
+		this.extensionId = extensionId;
+	}
+
+	run(): TPromise<any> {
+		return this.viewletService.openViewlet(VIEWLET_ID, true)
+			.then(viewlet => viewlet as IExtensionsViewlet)
+			.then(viewlet => {
+				if (this.extensionsWorkbenchService.local.some(x => x.id.toLowerCase() === this.extensionId.toLowerCase())) {
+					this.enabled = false;
+					this.messageService.show(Severity.Info, localize('extensionInstalled', "The recommended extension has already been installed"));
+					viewlet.focus();
+					return TPromise.as(null);
+				}
+
+				viewlet.search('@recommended');
+				viewlet.focus();
+
+				return this.extensionsWorkbenchService.queryGallery({ names: [this.extensionId], source: 'install-recommendation' }).then(pager => {
+					return (pager && pager.firstPage && pager.firstPage.length) ? this.extensionsWorkbenchService.install(pager.firstPage[0]) : TPromise.as(null);
+				});
+			});
+	}
+
+	protected isEnabled(): boolean {
+		return !this.extensionsWorkbenchService.local.some(x => x.id.toLowerCase() === this.extensionId.toLowerCase());
+	}
+
+	dispose(): void {
+		super.dispose();
+	}
+}
+
 
 export class ShowRecommendedKeymapExtensionsAction extends Action {
 
@@ -1368,11 +1459,13 @@ export class ConfigureWorkspaceRecommendedExtensionsAction extends AbstractConfi
 	}
 
 	public run(event: any): TPromise<any> {
-		const workspace = this.contextService.getWorkspace();
-		if (workspace.configuration) {
-			return this.openWorkspaceConfigurationFile(workspace.configuration);
+		switch (this.contextService.getWorkbenchState()) {
+			case WorkbenchState.FOLDER:
+				return this.openExtensionsFile(this.contextService.getWorkspace().folders[0].toResource(paths.join('.vscode', 'extensions.json')));
+			case WorkbenchState.WORKSPACE:
+				return this.openWorkspaceConfigurationFile(this.contextService.getWorkspace().configuration);
 		}
-		return this.openExtensionsFile(this.contextService.toResource(paths.join('.vscode', 'extensions.json'), workspace.folders[0]));
+		return TPromise.as(null);
 	}
 
 	dispose(): void {
@@ -1391,12 +1484,12 @@ export class ConfigureWorkspaceFolderRecommendedExtensionsAction extends Abstrac
 	constructor(
 		id: string,
 		label: string,
-		@IQuickOpenService private quickOpenService: IQuickOpenService,
 		@IFileService fileService: IFileService,
 		@IWorkspaceContextService contextService: IWorkspaceContextService,
 		@IWorkbenchEditorService editorService: IWorkbenchEditorService,
 		@IJSONEditingService jsonEditingService: IJSONEditingService,
-		@ITextModelService textModelResolverService: ITextModelService
+		@ITextModelService textModelResolverService: ITextModelService,
+		@ICommandService private commandService: ICommandService
 	) {
 		super(id, label, contextService, fileService, editorService, jsonEditingService, textModelResolverService);
 		this.contextService.onDidChangeWorkspaceFolders(() => this.update(), this, this.disposables);
@@ -1408,19 +1501,14 @@ export class ConfigureWorkspaceFolderRecommendedExtensionsAction extends Abstrac
 	}
 
 	public run(): TPromise<any> {
-		const picks: IPickOpenEntry[] = this.contextService.getWorkspace().folders.map((folder, index) => {
-			return <IPickOpenEntry>{
-				label: folder.name,
-				id: `${index}`
-			};
-		});
-
-		return this.quickOpenService.pick(picks, { placeHolder: localize('pickFolder', "Select Workspace Folder") })
-			.then(pick => {
-				if (pick) {
-					return this.openExtensionsFile(this.contextService.toResource(paths.join('.vscode', 'extensions.json'), this.contextService.getWorkspace().folders[parseInt(pick.id)]));
+		const folderCount = this.contextService.getWorkspace().folders.length;
+		const pickFolderPromise = folderCount === 1 ? TPromise.as(this.contextService.getWorkspace().folders[0]) : this.commandService.executeCommand<IWorkspaceFolder>(PICK_WORKSPACE_FOLDER_COMMAND);
+		return pickFolderPromise
+			.then(workspaceFolder => {
+				if (workspaceFolder) {
+					return this.openExtensionsFile(workspaceFolder.toResource(paths.join('.vscode', 'extensions.json')));
 				}
-				return undefined;
+				return null;
 			});
 	}
 
@@ -1537,7 +1625,7 @@ export class EnableAllAction extends Action {
 	}
 
 	private update(): void {
-		this.enabled = this.extensionsWorkbenchService.local.some(e => this.extensionEnablementService.canEnable(e.id) && e.disabledGlobally);
+		this.enabled = this.extensionsWorkbenchService.local.some(e => this.extensionEnablementService.canEnable(e) && e.disabledGlobally);
 	}
 
 	run(): TPromise<any> {
@@ -1570,7 +1658,7 @@ export class EnableAllWorkpsaceAction extends Action {
 	}
 
 	private update(): void {
-		this.enabled = this.workspaceContextService.getWorkbenchState() !== WorkbenchState.EMPTY && this.extensionsWorkbenchService.local.some(e => this.extensionEnablementService.canEnable(e.id) && !e.disabledGlobally && e.disabledForWorkspace);
+		this.enabled = this.workspaceContextService.getWorkbenchState() !== WorkbenchState.EMPTY && this.extensionsWorkbenchService.local.some(e => this.extensionEnablementService.canEnable(e) && !e.disabledGlobally && e.disabledForWorkspace);
 	}
 
 	run(): TPromise<any> {

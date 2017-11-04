@@ -77,12 +77,11 @@ export class FileStat implements IFileStat {
 	public name: string;
 	public mtime: number;
 	public etag: string;
-	public isDirectory: boolean;
+	private _isDirectory: boolean;
 	public hasChildren: boolean;
 	public children: FileStat[];
 	public parent: FileStat;
 
-	public exists: boolean;
 	public isDirectoryResolved: boolean;
 
 	constructor(resource: URI, public root: FileStat, isDirectory?: boolean, hasChildren?: boolean, name: string = paths.basename(resource.fsPath), mtime?: number, etag?: string) {
@@ -93,16 +92,31 @@ export class FileStat implements IFileStat {
 		this.etag = etag;
 		this.mtime = mtime;
 
-		// Prepare child stat array
-		if (this.isDirectory) {
-			this.children = [];
-		}
 		if (!this.root) {
 			this.root = this;
 		}
 
 		this.isDirectoryResolved = false;
-		this.exists = true;
+	}
+
+	public get isDirectory(): boolean {
+		return this._isDirectory;
+	}
+
+	public set isDirectory(value: boolean) {
+		if (value !== this._isDirectory) {
+			this._isDirectory = value;
+			if (this._isDirectory) {
+				this.children = [];
+			} else {
+				this.children = undefined;
+			}
+		}
+
+	}
+
+	public get nonexistentRoot(): boolean {
+		return this.isRoot && !this.isDirectoryResolved && this.isDirectory;
 	}
 
 	public getId(): string {
@@ -273,7 +287,8 @@ export class FileStat implements IFileStat {
 	}
 
 	private updateResource(recursive: boolean): void {
-		this.resource = URI.file(paths.join(this.parent.resource.fsPath, this.name));
+		this.resource = this.parent.resource.with({ path: paths.join(this.parent.resource.path, this.name) });
+		// this.resource = URI.file(paths.join(this.parent.resource.fsPath, this.name));
 
 		if (recursive) {
 			if (this.isDirectory && this.hasChildren && this.children) {
@@ -432,6 +447,6 @@ export class OpenEditor {
 	}
 
 	public getResource(): URI {
-		return toResource(this.editor, { supportSideBySide: true, filter: ['file', 'untitled'] });
+		return toResource(this.editor, { supportSideBySide: true });
 	}
 }

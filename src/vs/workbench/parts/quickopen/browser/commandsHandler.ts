@@ -16,8 +16,6 @@ import { Mode, IEntryRunContext, IAutoFocus, IModel, IQuickNavigateConfiguration
 import { QuickOpenEntryGroup, IHighlight, QuickOpenModel, QuickOpenEntry } from 'vs/base/parts/quickopen/browser/quickOpenModel';
 import { SyncActionDescriptor, IMenuService, MenuId, MenuItemAction } from 'vs/platform/actions/common/actions';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
-import { IWorkbenchActionRegistry, Extensions as ActionExtensions } from 'vs/workbench/common/actions';
-import { Registry } from 'vs/platform/registry/common/platform';
 import { QuickOpenHandler, IWorkbenchQuickOpenConfiguration } from 'vs/workbench/browser/quickopen';
 import { IEditorAction, IEditor, ICommonCodeEditor } from 'vs/editor/common/editorCommon';
 import { matchesWords, matchesPrefix, matchesContiguousSubString, or } from 'vs/base/common/filters';
@@ -35,6 +33,7 @@ import { BoundedMap, ISerializedBoundedLinkedMap } from 'vs/base/common/map';
 import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { ResolvedKeybinding } from 'vs/base/common/keyCodes';
 import { IEditorGroupService } from 'vs/workbench/services/group/common/groupService';
+import { isPromiseCanceledError } from 'vs/base/common/errors';
 
 export const ALL_COMMANDS_PREFIX = '>';
 
@@ -97,7 +96,7 @@ class CommandsHistory {
 	}
 
 	private registerListeners(): void {
-		this.configurationService.onDidUpdateConfiguration(e => this.updateConfiguration());
+		this.configurationService.onDidChangeConfiguration(e => this.updateConfiguration());
 		once(this.lifecycleService.onShutdown)(reason => this.save());
 	}
 
@@ -265,9 +264,13 @@ abstract class BaseCommandEntry extends QuickOpenEntryGroup {
 		return nls.localize('entryAriaLabel', "{0}, commands", this.getLabel());
 	}
 
-	protected onError(error?: Error): void;
-	protected onError(messagesWithAction?: IMessageWithAction): void;
-	protected onError(arg1?: any): void {
+	private onError(error?: Error): void;
+	private onError(messagesWithAction?: IMessageWithAction): void;
+	private onError(arg1?: any): void {
+		if (isPromiseCanceledError(arg1)) {
+			return;
+		}
+
 		const messagesWithAction: IMessageWithAction = arg1;
 		if (messagesWithAction && typeof messagesWithAction.message === 'string' && Array.isArray(messagesWithAction.actions)) {
 			this.messageService.show(Severity.Error, messagesWithAction);
@@ -297,6 +300,12 @@ abstract class BaseCommandEntry extends QuickOpenEntryGroup {
 		TPromise.timeout(50).done(() => {
 			if (action && (!(action instanceof Action) || action.enabled)) {
 				try {
+					/* __GDPR__
+						"workbenchActionExecuted" : {
+							"id" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" },
+							"from": { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+						}
+					*/
 					this.telemetryService.publicLog('workbenchActionExecuted', { id: action.id, from: 'quick open' });
 					(action.run() || TPromise.as(null)).done(() => {
 						if (action instanceof Action) {
@@ -380,6 +389,9 @@ class ActionCommandEntry extends BaseCommandEntry {
 const wordFilter = or(matchesPrefix, matchesWords, matchesContiguousSubString);
 
 export class CommandsHandler extends QuickOpenHandler {
+
+	public static readonly ID = 'workbench.picker.commands';
+
 	private lastSearchValue: string;
 	private commandHistoryEnabled: boolean;
 	private commandsHistory: CommandsHistory;
@@ -397,7 +409,7 @@ export class CommandsHandler extends QuickOpenHandler {
 
 		this.commandsHistory = this.instantiationService.createInstance(CommandsHistory);
 
-		this.configurationService.onDidUpdateConfiguration(e => this.updateConfiguration());
+		this.configurationService.onDidChangeConfiguration(e => this.updateConfiguration());
 		this.updateConfiguration();
 	}
 
@@ -408,11 +420,6 @@ export class CommandsHandler extends QuickOpenHandler {
 	public getResults(searchValue: string): TPromise<QuickOpenModel> {
 		searchValue = searchValue.trim();
 		this.lastSearchValue = searchValue;
-
-		// Workbench Actions
-		let workbenchEntries: CommandEntry[] = [];
-		const workbenchActions = Registry.as<IWorkbenchActionRegistry>(ActionExtensions.WorkbenchActions).getWorkbenchActions();
-		workbenchEntries = this.actionDescriptorsToEntries(workbenchActions, searchValue);
 
 		// Editor Actions
 		const activeEditor = this.editorService.getActiveEditor();
@@ -434,7 +441,7 @@ export class CommandsHandler extends QuickOpenHandler {
 		const commandEntries = this.menuItemActionsToEntries(menuActions, searchValue);
 
 		// Concat
-		let entries = [...workbenchEntries, ...editorEntries, ...commandEntries];
+		let entries = [...editorEntries, ...commandEntries];
 
 		// Remove duplicates
 		entries = arrays.distinct(entries, entry => `${entry.getLabel()}${entry.getGroupLabel()}${entry.getCommandId()}`);
@@ -487,35 +494,6 @@ export class CommandsHandler extends QuickOpenHandler {
 		}
 
 		return TPromise.as(new QuickOpenModel(entries));
-	}
-
-	private actionDescriptorsToEntries(actionDescriptors: SyncActionDescriptor[], searchValue: string): CommandEntry[] {
-		const entries: CommandEntry[] = [];
-		const registry = Registry.as<IWorkbenchActionRegistry>(ActionExtensions.WorkbenchActions);
-
-		for (let i = 0; i < actionDescriptors.length; i++) {
-			const actionDescriptor = actionDescriptors[i];
-			if (actionDescriptor.label) {
-
-				// Label (with optional category)
-				let label = actionDescriptor.label;
-				const category = registry.getCategory(actionDescriptor.id);
-				if (category) {
-					label = nls.localize('commandLabel', "{0}: {1}", category, label);
-				}
-
-				// Alias for non default languages
-				const alias = (language !== LANGUAGE_DEFAULT) ? registry.getAlias(actionDescriptor.id) : null;
-				const labelHighlights = wordFilter(searchValue, label);
-				const aliasHighlights = alias ? wordFilter(searchValue, alias) : null;
-
-				if (labelHighlights || aliasHighlights) {
-					entries.push(this.instantiationService.createInstance(CommandEntry, actionDescriptor.id, this.keybindingService.lookupKeybinding(actionDescriptor.id), label, alias, { label: labelHighlights, alias: aliasHighlights }, actionDescriptor, (id: string) => this.onBeforeRunCommand(id)));
-				}
-			}
-		}
-
-		return entries;
 	}
 
 	private editorActionsToEntries(actions: IEditorAction[], searchValue: string): EditorActionCommandEntry[] {

@@ -115,6 +115,8 @@ export function fromViewColumn(column?: vscode.ViewColumn): EditorPosition {
 		editorColumn = EditorPosition.TWO;
 	} else if (column === <number>types.ViewColumn.Three) {
 		editorColumn = EditorPosition.THREE;
+	} else if (column === <number>types.ViewColumn.Active) {
+		editorColumn = undefined;
 	}
 	return editorColumn;
 }
@@ -137,7 +139,7 @@ function isDecorationOptions(something: any): something is vscode.DecorationOpti
 	return (typeof something.range !== 'undefined');
 }
 
-function isDecorationOptionsArr(something: vscode.Range[] | vscode.DecorationOptions[]): something is vscode.DecorationOptions[] {
+export function isDecorationOptionsArr(something: vscode.Range[] | vscode.DecorationOptions[]): something is vscode.DecorationOptions[] {
 	if (something.length === 0) {
 		return true;
 	}
@@ -156,7 +158,7 @@ export namespace MarkdownString {
 	}
 
 	function isCodeblock(thing: any): thing is Codeblock {
-		return typeof thing === 'object'
+		return thing && typeof thing === 'object'
 			&& typeof (<Codeblock>thing).language === 'string'
 			&& typeof (<Codeblock>thing).value === 'string';
 	}
@@ -168,7 +170,7 @@ export namespace MarkdownString {
 		} else if (htmlContent.isMarkdownString(markup)) {
 			return markup;
 		} else if (typeof markup === 'string') {
-			return { value: <string>markup, isTrusted: true };
+			return { value: <string>markup };
 		} else {
 			return { value: '' };
 		}
@@ -177,6 +179,13 @@ export namespace MarkdownString {
 		const ret = new htmlContent.MarkdownString(value.value);
 		ret.isTrusted = value.isTrusted;
 		return ret;
+	}
+
+	export function fromStrict(value: string | types.MarkdownString): undefined | string | htmlContent.IMarkdownString {
+		if (!value) {
+			return undefined;
+		}
+		return typeof value === 'string' ? value : MarkdownString.from(value);
 	}
 }
 
@@ -282,7 +291,7 @@ export const location = {
 	from(value: vscode.Location): modes.Location {
 		return {
 			range: value.range && fromRange(value.range),
-			uri: <URI>value.uri
+			uri: value.uri
 		};
 	},
 	to(value: modes.Location): types.Location {
@@ -303,6 +312,28 @@ export function toHover(info: modes.Hover): types.Hover {
 
 export function toDocumentHighlight(occurrence: modes.DocumentHighlight): types.DocumentHighlight {
 	return new types.DocumentHighlight(toRange(occurrence.range), occurrence.kind);
+}
+
+export namespace CompletionTriggerKind {
+	export function from(kind: modes.SuggestTriggerKind) {
+		switch (kind) {
+			case modes.SuggestTriggerKind.TriggerCharacter:
+				return types.CompletionTriggerKind.TriggerCharacter;
+
+			case modes.SuggestTriggerKind.Invoke:
+			default:
+				return types.CompletionTriggerKind.Invoke;
+		}
+	}
+}
+
+export namespace CompletionContext {
+	export function from(context: modes.SuggestContext): types.CompletionContext {
+		return {
+			triggerKind: CompletionTriggerKind.from(context.triggerKind),
+			triggerCharacter: context.triggerCharacter
+		};
+	}
 }
 
 export const CompletionItemKind = {
@@ -385,7 +416,7 @@ export namespace ParameterInformation {
 	export function from(info: types.ParameterInformation): modes.ParameterInformation {
 		return {
 			label: info.label,
-			documentation: info.documentation && MarkdownString.from(info.documentation)
+			documentation: MarkdownString.fromStrict(info.documentation)
 		};
 	}
 	export function to(info: modes.ParameterInformation): types.ParameterInformation {
@@ -401,7 +432,7 @@ export namespace SignatureInformation {
 	export function from(info: types.SignatureInformation): modes.SignatureInformation {
 		return {
 			label: info.label,
-			documentation: info.documentation && MarkdownString.from(info.documentation),
+			documentation: MarkdownString.fromStrict(info.documentation),
 			parameters: info.parameters && info.parameters.map(ParameterInformation.from)
 		};
 	}
